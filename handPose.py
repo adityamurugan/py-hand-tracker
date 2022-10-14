@@ -8,6 +8,7 @@ mp_hands = mp.solutions.hands
 from websocket import create_connection
 import numpy as np
 import math
+# TO DO -- remove unused imports
 from pyquaternion import Quaternion
 from math import acos, atan2, cos, pi, sin
 from numpy import array, cross, dot, float64, hypot, zeros
@@ -15,25 +16,33 @@ from numpy.linalg import norm
 from random import gauss, uniform
 from eulerangles import matrix2euler
 
+# Connections to calculate finger angles
 connections = [[0,5,6],[5,6,7],[6,7,8],[0,9,10],[9,10,11],[10,11,12],[0,17,18],[17,18,19],[18,19,20],[0,13,14],[13,14,15],[14,15,16],[1,2,3],[2,3,4]]
 
+# Function to calculate angle between 3 3D points
 def angle(a, b, c):
-
+    #create vectors
     ba = a - b
     bc = c - b
-
+    #find axis and angle
     axis = np.cross(ba,bc)/(np.linalg.norm(np.cross(ba,bc)))
     cosine_angle = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc))
     angle = np.arccos(cosine_angle)
     return axis,np.degrees(angle)
 
+# Function to round up x by y
 def roundup(x,y):
   return float(math.ceil(x / y)) * y
 
 firstPoints = []
-# For webcam input:
+
+# Get webcam input
 cap = cv2.VideoCapture(0)
+
+# Load gesture recognizer model
 model = tf.keras.models.load_model('keypoint_classifier.hdf5')
+
+# Initialize mediapipe hands
 with mp_hands.Hands(
     model_complexity=1,
     min_detection_confidence=0.5,
@@ -41,18 +50,16 @@ with mp_hands.Hands(
   while cap.isOpened():
     gesOutput = 0
     temp= []
+    # Connect to local websocket server - Server should be running before running script
+    # TO DO -- Add 'try except' blocks to handle errors
     ws = create_connection("ws://localhost:7000/websocket")
     success, image = cap.read()
     if not success:
       print("Ignoring empty camera frame.")
-      # If loading a video, use 'break' instead of 'continue'.
       continue
-    # To improve performance, optionally mark the image as not writeable to
-    # pass by reference.
     image.flags.writeable = False
     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     results = hands.process(image)
-    # Draw the hand annotations on the image.
     image.flags.writeable = True
     image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
     img_h, img_w, img_c = image.shape
@@ -61,12 +68,14 @@ with mp_hands.Hands(
         j=0
         row = []
         for lmark in hand_landmarks.landmark:
+            # Collecting datapoints for gesture inference
             if j == 0:
                 indX = lmark.x*img_w
                 indY = lmark.y*img_h
             row.append((lmark.x*img_w)-indX)
             row.append((lmark.y*img_h)-indY)
             j+=1
+        # Getting position of KPs 5 and 13 wrt wrist    
         rt_mid_mcp = hand_landmarks.landmark[13]
         rt_ind_mcp = hand_landmarks.landmark[5]
         rt_wr = hand_landmarks.landmark[0]
@@ -84,6 +93,7 @@ with mp_hands.Hands(
             mp_drawing_styles.get_default_hand_landmarks_style(),
             mp_drawing_styles.get_default_hand_connections_style())
       for hand_landmarks in results.multi_hand_world_landmarks:
+        # Getting angles of fingers
         i = 0
         for connection in connections:
           pt1 = np.array([hand_landmarks.landmark[connection[0]].x,hand_landmarks.landmark[connection[0]].y,hand_landmarks.landmark[connection[0]].z])
@@ -102,12 +112,14 @@ with mp_hands.Hands(
           i = i + 1
         # print(dist)
         if results.multi_hand_landmarks:
+          # Performing gesture inference
           maxValue = abs(max(row, key=abs))
           newRow = [x / maxValue for x in row]
           predict_result = model.predict(np.array([newRow]))
           gesOutput = np.argmax(np.squeeze(predict_result))
           print(gesOutput)
           dist.append(gesOutput)
+        # Send all data to WS server for broadcast to Unity  
         ws.send(str(dist))
     cv2.imshow('MediaPipe Hands', cv2.flip(image, 1))
     ws.close()

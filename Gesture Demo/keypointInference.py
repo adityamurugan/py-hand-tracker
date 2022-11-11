@@ -20,7 +20,7 @@ model = tf.keras.models.load_model('./keypoint_classifier.hdf5')
 with mp_hands.Hands(
     model_complexity=1,
     min_detection_confidence=0.9,
-    max_num_hands=2,
+    max_num_hands=1,
     min_tracking_confidence=0.9) as hands:
   while cap.isOpened():
     gesOutput = 0
@@ -43,6 +43,7 @@ with mp_hands.Hands(
             if i == 0:
                 indX = lmark.x*image_width
                 indY = lmark.y*image_height
+                print(lmark.z)
             row.append((lmark.x*image_width)-indX)
             row.append((lmark.y*image_height)-indY)
             i+=1

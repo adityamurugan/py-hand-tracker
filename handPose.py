@@ -15,6 +15,7 @@ from numpy import array, cross, dot, float64, hypot, zeros
 from numpy.linalg import norm
 from random import gauss, uniform
 from eulerangles import matrix2euler
+from kalman import OnlineUnivariateKalmanFilter
 
 # Connections to calculate finger angles
 connections = [[0,5,6],[5,6,7],[6,7,8],[0,9,10],[9,10,11],[10,11,12],[0,17,18],[17,18,19],[18,19,20],[0,13,14],[13,14,15],[14,15,16],[1,2,3],[2,3,4]]
@@ -36,6 +37,9 @@ def roundup(x,y):
 
 firstPoints = []
 
+# Initialize kalman filters
+filters = [OnlineUnivariateKalmanFilter() for i in range(9)]
+filterInitPoints = [[], [], [], [], [], [], [], [], []]
 # Get webcam input
 cap = cv2.VideoCapture(0)
 
@@ -43,6 +47,7 @@ cap = cv2.VideoCapture(0)
 model = tf.keras.models.load_model('keypoint_classifier.hdf5')
 
 # Initialize mediapipe hands
+k=0
 with mp_hands.Hands(
     model_complexity=1,
     min_detection_confidence=0.5,
@@ -110,16 +115,29 @@ with mp_hands.Hands(
           if(i == 11):
             dist.append(55.184)
           i = i + 1
-        # print(dist)
+        if(k<25):
+          for a,b in enumerate(filterInitPoints):
+            b.append(dist[a])
+            # print(dist[a])
+        # print(filterInitPoints)
+        k+=1
         if results.multi_hand_landmarks:
           # Performing gesture inference
           maxValue = abs(max(row, key=abs))
           newRow = [x / maxValue for x in row]
           predict_result = model.predict(np.array([newRow]))
           gesOutput = np.argmax(np.squeeze(predict_result))
-          print(gesOutput)
+          # print(gesOutput)
           dist.append(gesOutput)
-        # Send all data to WS server for broadcast to Unity  
+        # smooth data and send to WS server for broadcast to Unity  
+        if(k==25):
+          for index,filter in enumerate(filters):
+            filter.initialize(filterInitPoints[index])
+        if(k>25):
+          for index,filter in enumerate(filters):
+            mean,cov = filter.observe(dist[index])
+            dist[index] = round(mean[0],2)
+        print(dist)
         ws.send(str(dist))
     cv2.imshow('MediaPipe Hands', cv2.flip(image, 1))
     ws.close()

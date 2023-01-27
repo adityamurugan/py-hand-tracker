@@ -2,6 +2,7 @@ from gettext import find
 import tensorflow as tf
 import cv2
 import mediapipe as mp
+from one_euro_filter import OneEuroFilter
 mp_drawing = mp.solutions.drawing_utils
 mp_drawing_styles = mp.solutions.drawing_styles
 mp_hands = mp.solutions.hands
@@ -39,21 +40,27 @@ firstPoints = []
 
 # Initialize kalman filters
 filters = [OnlineUnivariateKalmanFilter() for i in range(9)]
-filterInitPoints = [[], [], [], [], [], [], [], [], []]
+filterInitPoints= []
+for x in range(12):
+    filterInitPoints.append([[]])
+# filterInitPoints = [[], [], [], [], [], [], [], [], []]
 # Get webcam input
 cap = cv2.VideoCapture(0)
 
 # Load gesture recognizer model
-model = tf.keras.models.load_model('keypoint_classifier.hdf5')
+model = tf.keras.models.load_model('models/keypoint_classifier.hdf5')
+modelL = tf.keras.models.load_model('./models/keypoint_classifier_L.hdf5')
 
 # Initialize mediapipe hands
 k=0
 with mp_hands.Hands(
     model_complexity=1,
-    min_detection_confidence=0.5,
+    max_num_hands=1,
+    min_detection_confidence=0.8,
     min_tracking_confidence=0.5) as hands:
   while cap.isOpened():
     gesOutput = 0
+    gesOutputL = 0
     temp= []
     # Connect to local websocket server - Server should be running before running script
     # TO DO -- Add 'try except' blocks to handle errors
@@ -65,13 +72,16 @@ with mp_hands.Hands(
     image.flags.writeable = False
     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     results = hands.process(image)
+    dists =[]
+    rows = []
     image.flags.writeable = True
     image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
     img_h, img_w, img_c = image.shape
     if results.multi_hand_landmarks:
-      for hand_landmarks in results.multi_hand_landmarks:
+      for index, hand_landmarks in enumerate(results.multi_hand_landmarks):
         j=0
         row = []
+        row.append('Left') if results.multi_handedness[index].classification[0].label=='Right' else row.append('Right')
         for lmark in hand_landmarks.landmark:
             # Collecting datapoints for gesture inference
             if j == 0:
@@ -80,16 +90,28 @@ with mp_hands.Hands(
             row.append((lmark.x*img_w)-indX)
             row.append((lmark.y*img_h)-indY)
             j+=1
+        rows.append(row)
+        for row in rows:
+          if(row[0]=='Right'):
+            maxValue = abs(max(row[1:], key=abs))
+            newRow = [x / maxValue for x in row[1:]]
+            predict_result = model.predict(np.array([newRow]))
+            gesOutput = np.argmax(np.squeeze(predict_result))
+          if(row[0]=='Left'):
+            maxValue = abs(max(row[1:], key=abs))
+            newRow = [x / maxValue for x in row[1:]]
+            predict_result = modelL.predict(np.array([newRow]))
+            gesOutputL = np.argmax(np.squeeze(predict_result))
         # Getting position of KPs 5 and 13 wrt wrist    
         rt_mid_mcp = hand_landmarks.landmark[13]
         rt_ind_mcp = hand_landmarks.landmark[5]
         rt_wr = hand_landmarks.landmark[0]
-        zPt1 = hand_landmarks.landmark[17]
-        zPt2 = hand_landmarks.landmark[0]
+        zPt1 = hand_landmarks.landmark[5]
+        zPt2 = hand_landmarks.landmark[17]
         zDist = (np.linalg.norm(np.array([zPt1.x,zPt1.y,zPt1.z])-np.array([zPt2.x,zPt2.y,zPt2.z])))*10
-        # print(roundup(zDist,0.2))
-        dist = [roundup(rt_mid_mcp.x-rt_wr.x,0.01),roundup(rt_mid_mcp.y-rt_wr.y,0.01),roundup(rt_mid_mcp.z-rt_wr.z,0.01),
-                roundup(rt_ind_mcp.x-rt_wr.x,0.01),roundup(rt_ind_mcp.y-rt_wr.y,0.01),roundup(rt_ind_mcp.z-rt_wr.z,0.01)]
+        # print(roundup(zDist,0.1))
+        dist = [rt_mid_mcp.x-rt_wr.x,rt_mid_mcp.y-rt_wr.y,rt_mid_mcp.z-rt_wr.z,
+                rt_ind_mcp.x-rt_wr.x,rt_ind_mcp.y-rt_wr.y,rt_ind_mcp.z-rt_wr.z]
         dist.extend([-round(hand_landmarks.landmark[0].x-0.5,1),-round(hand_landmarks.landmark[0].y-0.5,2),round(zDist,1)-1.5])
         mp_drawing.draw_landmarks(
             image,
@@ -97,7 +119,7 @@ with mp_hands.Hands(
             mp_hands.HAND_CONNECTIONS,
             mp_drawing_styles.get_default_hand_landmarks_style(),
             mp_drawing_styles.get_default_hand_connections_style())
-      for hand_landmarks in results.multi_hand_world_landmarks:
+      # for hand_landmarks in results.multi_hand_world_landmarks:
         # Getting angles of fingers
         i = 0
         for connection in connections:
@@ -111,34 +133,31 @@ with mp_hands.Hands(
             fingerAngle = fingerAngle + 10
           else:
             fingerAngle = fingerAngle - 180
-          dist.append(roundup(fingerAngle,5))
+          dist.append(fingerAngle)
           if(i == 11):
             dist.append(55.184)
           i = i + 1
-        if(k<25):
+        if k==0:
+          x_track = [OneEuroFilter(k, dist[p], 1.6, min_cutoff=0.0001,beta=1.0,d_cutoff=0.5) for p in range(12)]
+        if k > 1:
+          for i in range(12):
+            dist[i] = round(x_track[i](k, dist[i]),2)
+        if(k<200):
           for a,b in enumerate(filterInitPoints):
             b.append(dist[a])
-            # print(dist[a])
-        # print(filterInitPoints)
         k+=1
-        if results.multi_hand_landmarks:
-          # Performing gesture inference
-          maxValue = abs(max(row, key=abs))
-          newRow = [x / maxValue for x in row]
-          predict_result = model.predict(np.array([newRow]))
-          gesOutput = np.argmax(np.squeeze(predict_result))
-          # print(gesOutput)
-          dist.append(gesOutput)
-        # smooth data and send to WS server for broadcast to Unity  
-        if(k==25):
-          for index,filter in enumerate(filters):
-            filter.initialize(filterInitPoints[index])
-        if(k>25):
-          for index,filter in enumerate(filters):
-            mean,cov = filter.observe(dist[index])
-            dist[index] = round(mean[0],2)
-        print(dist)
-        ws.send(str(dist))
+        # if(k>200):
+        #   k=0
+        print(results.multi_handedness[index].classification[0].label,results.multi_handedness[index].classification[0].score)
+        if results.multi_handedness[index].classification[0].label=='Right' and results.multi_handedness[index].classification[0].score>0.85:
+          dist.extend([gesOutputL,1])
+        else:
+          dist.extend([gesOutput,0])
+        print(dist[len(dist)-1])
+        dists.append(dist)
+    if len(dists)!=0:
+      # print(dists)
+      ws.send(str(dists))
     cv2.imshow('MediaPipe Hands', cv2.flip(image, 1))
     ws.close()
     if cv2.waitKey(5) & 0xFF == 27:

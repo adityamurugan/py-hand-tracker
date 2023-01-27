@@ -15,12 +15,12 @@ fontColor              = (0,255,0)
 thickness              = 1
 lineType               = 2
 
-model = tf.keras.models.load_model('./keypoint_classifier.hdf5')
+model = tf.keras.models.load_model('./models/keypoint_classifier_L.hdf5')
 
 with mp_hands.Hands(
     model_complexity=1,
     min_detection_confidence=0.9,
-    max_num_hands=1,
+    max_num_hands=2,
     min_tracking_confidence=0.9) as hands:
   while cap.isOpened():
     gesOutput = 0
@@ -32,30 +32,35 @@ with mp_hands.Hands(
     image.flags.writeable = False
     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     results = hands.process(image)
-    row = []
+    rows = []
     image_height, image_width, _ = image.shape
     image.flags.writeable = True
     image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
     if results.multi_hand_landmarks:
-      for hand_landmarks in results.multi_hand_landmarks:
+      for index, hand_landmarks in enumerate(results.multi_hand_landmarks):
+        row=[]
         i=0
+        print(results.multi_handedness[index].classification[0].label)
+        row.append('Left') if results.multi_handedness[index].classification[0].label=='Right' else row.append('Right')
         for lmark in hand_landmarks.landmark:
             if i == 0:
                 indX = lmark.x*image_width
                 indY = lmark.y*image_height
-                print(lmark.z)
+                # print(lmark.z)
             row.append((lmark.x*image_width)-indX)
             row.append((lmark.y*image_height)-indY)
             i+=1
+        rows.append(row)
         mp_drawing.draw_landmarks(
             image,
             hand_landmarks,
             mp_hands.HAND_CONNECTIONS,
             mp_drawing_styles.get_default_hand_landmarks_style(),
             mp_drawing_styles.get_default_hand_connections_style())            
-    if results.multi_hand_landmarks:
-        maxValue = abs(max(row, key=abs))
-        newRow = [x / maxValue for x in row]
+    for row in rows:
+      if(row[0]=='Left'):
+        maxValue = abs(max(row[1:], key=abs))
+        newRow = [x / maxValue for x in row[1:]]
         predict_result = model.predict(np.array([newRow]))
         gesOutput = np.argmax(np.squeeze(predict_result))
     image = cv2.flip(image, 1)
@@ -70,4 +75,3 @@ with mp_hands.Hands(
     if cv2.waitKey(5) & 0xFF == 27:
       break
 cap.release()
-

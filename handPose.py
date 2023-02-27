@@ -6,9 +6,11 @@ from one_euro_filter import OneEuroFilter
 mp_drawing = mp.solutions.drawing_utils
 mp_drawing_styles = mp.solutions.drawing_styles
 mp_hands = mp.solutions.hands
+mp_pose = mp.solutions.pose
 from websocket import create_connection
 import numpy as np
 import math
+import pandas as pd
 # TO DO -- remove unused imports
 from pyquaternion import Quaternion
 from math import acos, atan2, cos, pi, sin
@@ -17,9 +19,43 @@ from numpy.linalg import norm
 from random import gauss, uniform
 from eulerangles import matrix2euler
 from kalman import OnlineUnivariateKalmanFilter
+from protobuf_to_dict import protobuf_to_dict
+
+def calculateAngle(a, b, c):
+
+    a = np.array(a)[:3]
+    b = np.array(b)[:3]
+    c = np.array(c)[:3]
+    # print(len(a))
+    ba = a - b
+    bc = c - b
+    # axis = np.cross(ba,bc)/(np.linalg.norm(np.cross(ba,bc)))
+    cosine_angle = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc))
+    angle = np.degrees(np.arccos(cosine_angle))
+    # Check if the angle is less than zero.
+    if angle < 0:
+        # Add 360 to the found angle.
+        angle += 360
+    # Return the calculated angle.
+    return angle 
+
+def update_min_max(min_val, max_val, new_data):
+    new_min_val = min(min_val, new_data)
+    new_max_val = max(max_val, new_data)
+    return new_min_val, new_max_val
+
+def normalize(data, min_val, max_val):
+    return (data - min_val) / (max_val - min_val)
+
+def moving_average(prev_average, new_data, window_size):
+    return prev_average + (new_data - prev_average) / window_size
 
 # Connections to calculate finger angles
 connections = [[0,5,6],[5,6,7],[6,7,8],[0,9,10],[9,10,11],[10,11,12],[0,17,18],[17,18,19],[18,19,20],[0,13,14],[13,14,15],[14,15,16],[1,2,3],[2,3,4]]
+bodyPose = mp_pose.Pose(
+    model_complexity=2,
+    min_detection_confidence=0.8,
+    min_tracking_confidence=0.3)
 
 # Function to calculate angle between 3 3D points
 def angle(a, b, c):
@@ -41,7 +77,7 @@ firstPoints = []
 # Initialize kalman filters
 filters = [OnlineUnivariateKalmanFilter() for i in range(9)]
 filterInitPoints= []
-for x in range(12):
+for x in range(24):
     filterInitPoints.append([[]])
 # filterInitPoints = [[], [], [], [], [], [], [], [], []]
 # Get webcam input
@@ -53,11 +89,18 @@ modelL = tf.keras.models.load_model('./models/keypoint_classifier_L.hdf5')
 
 # Initialize mediapipe hands
 k=0
+min_val = float(75)
+max_val = float(140)
+window_size = 5
+n = 0
+counter = 0
+average = 0
+zAngleNorm = 0
 with mp_hands.Hands(
     model_complexity=1,
-    max_num_hands=1,
+    max_num_hands=2,
     min_detection_confidence=0.8,
-    min_tracking_confidence=0.5) as hands:
+    min_tracking_confidence=0.8) as hands:
   while cap.isOpened():
     gesOutput = 0
     gesOutputL = 0
@@ -72,6 +115,17 @@ with mp_hands.Hands(
     image.flags.writeable = False
     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     results = hands.process(image)
+    poseResults = bodyPose.process(image)
+    if poseResults.pose_landmarks is not None and results.multi_hand_landmarks is not None:
+      keypoints = protobuf_to_dict(poseResults.pose_world_landmarks)['landmark']
+      coords = [kps for kps in keypoints]
+      dfs = pd.DataFrame(coords)
+      vals = dfs.values
+      zAngle = calculateAngle(vals[12],vals[14],vals[16])
+      # print(vals[16][2])
+      # zAngle = calculateAngle(vals[12],[vals[12][0],vals[14][1],vals[14][2]],[vals[12][0],vals[16][1],vals[16][2]])
+      # min_val, max_val = update_min_max(min_val, max_val, zAngle)
+      zAngleNorm = normalize(zAngle, min_val, max_val)
     dists =[]
     rows = []
     image.flags.writeable = True
@@ -91,6 +145,7 @@ with mp_hands.Hands(
             row.append((lmark.y*img_h)-indY)
             j+=1
         rows.append(row)
+        # Gesture recog
         for row in rows:
           if(row[0]=='Right'):
             maxValue = abs(max(row[1:], key=abs))
@@ -112,7 +167,7 @@ with mp_hands.Hands(
         # print(roundup(zDist,0.1))
         dist = [rt_mid_mcp.x-rt_wr.x,rt_mid_mcp.y-rt_wr.y,rt_mid_mcp.z-rt_wr.z,
                 rt_ind_mcp.x-rt_wr.x,rt_ind_mcp.y-rt_wr.y,rt_ind_mcp.z-rt_wr.z]
-        dist.extend([-round(hand_landmarks.landmark[0].x-0.5,1),-round(hand_landmarks.landmark[0].y-0.5,2),round(zDist,1)-1.5])
+        dist.extend([-round(hand_landmarks.landmark[0].x-0.5,1),-round(hand_landmarks.landmark[0].y-0.5,2),round(zAngleNorm,1)/2])
         mp_drawing.draw_landmarks(
             image,
             hand_landmarks,
@@ -138,22 +193,23 @@ with mp_hands.Hands(
             dist.append(55.184)
           i = i + 1
         if k==0:
-          x_track = [OneEuroFilter(k, dist[p], 1.6, min_cutoff=0.0001,beta=1.0,d_cutoff=0.5) for p in range(12)]
+          x_track = [OneEuroFilter(k, dist[p], 1.6, min_cutoff=0.0001,beta=1.0,d_cutoff=0.5) for p in range(24)]
         if k > 1:
-          for i in range(12):
+          for i in range(24):
             dist[i] = round(x_track[i](k, dist[i]),2)
         if(k<200):
           for a,b in enumerate(filterInitPoints):
             b.append(dist[a])
         k+=1
+        print(dist[8])
         # if(k>200):
         #   k=0
-        print(results.multi_handedness[index].classification[0].label,results.multi_handedness[index].classification[0].score)
+        # print(results.multi_handedness[index].classification[0].label,results.multi_handedness[index].classification[0].score)
         if results.multi_handedness[index].classification[0].label=='Right' and results.multi_handedness[index].classification[0].score>0.85:
           dist.extend([gesOutputL,1])
         else:
           dist.extend([gesOutput,0])
-        print(dist[len(dist)-1])
+        # print(dist[len(dist)-1])
         dists.append(dist)
     if len(dists)!=0:
       # print(dists)
